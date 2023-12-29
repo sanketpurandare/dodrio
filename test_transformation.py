@@ -1,0 +1,356 @@
+# Owner(s): ["oncall: distributed"]
+
+import unittest
+from copy import deepcopy
+from functools import wraps
+from unittest.mock import MagicMock
+
+import torch
+import torch.nn as nn
+from torch._inductor.utils import has_triton
+from torch.distributed._spmd.api import compile
+from torch.distributed._tensor.op_schema import OpSchema, OutputSharding
+from torch.distributed._tensor.ops.utils import register_prop_rule
+from torch.distributed._tensor.placement_types import DTensorSpec
+from torch.distributed._spmd.gm_transformation import GraphModuleTransformation
+from torch.distributed._spmd.graph_optimization import (
+    _optimized_func,
+    comm_fusion_with_concat,
+    find_all_descendants,
+    get_all_fused_optimizer_blocks,
+    graph_optimization_pass,
+    iter_move_grads_and_optimizers,
+    remove_copy_from_optimizer,
+    schedule_comm_wait,
+    split_fused_optimizer,
+)
+from torch.distributed._spmd.graph_utils import find_node
+from torch.distributed._spmd.iter_graph_module import IterGraphModule
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
+from torch.testing._internal.common_utils import run_tests, skipIfRocm
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    DTensorTestBase,
+    with_comms as base_with_comms,
+)
+from typing import Any
+
+
+def with_comms(func):
+    @base_with_comms
+    @wraps(func)
+    def wrapper(self, *args, **kwargs):
+        # make sure we set different random seeds for each rank
+        # otherwise we dont need DDP / SPMD
+        # (we would have the same parameters and inputs everywhere)
+        torch.manual_seed(self.rank)
+        return func(self, *args, **kwargs)
+
+    return wrapper
+
+def sepm(x: torch.Tensor) -> torch.Tensor:
+    return x
+
+
+def sepm_backward(grad: torch.Tensor) -> torch.Tensor:
+    return grad
+
+
+separator_lib = torch.library.Library("separator", "DEF")
+separator_lib.define("sepm(Tensor x) -> Tensor")
+separator_lib.impl("sepm", sepm, "CompositeExplicitAutograd")
+separator_lib.define("sepm_backward(Tensor x) -> Tensor")
+separator_lib.impl("sepm_backward", sepm_backward, "CompositeExplicitAutograd")
+
+
+def _identity_prop_rule(op_schema: OpSchema) -> OutputSharding:
+    (x,) = op_schema.args_schema
+    assert isinstance(x, DTensorSpec), f"expecting DTensorSpec but got {x}"
+
+    return OutputSharding(output_spec=DTensorSpec(x.mesh, x.placements))
+
+
+@register_prop_rule(torch.ops.separator.sepm.default)
+def _prop_sepm(op_schema: OpSchema) -> OutputSharding:
+    return _identity_prop_rule(op_schema)
+
+
+@register_prop_rule(torch.ops.separator.sepm_backward.default)
+def _prop_sepm_backward(op_schema: OpSchema) -> OutputSharding:
+    return _identity_prop_rule(op_schema)
+
+
+class SEPMFunction(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx: Any, x: torch.Tensor) -> torch.Tensor:
+        return torch.ops.separator.sepm(x)
+
+    @staticmethod
+    def backward(ctx: Any, grad_x: torch.Tensor) -> torch.Tensor:
+        return torch.ops.separator.sepm_backward(grad_x)
+
+class DummyModel(nn.Module):
+    def __init__(self, layers: int, dim: int):
+        super().__init__()
+        modules = []
+        for _ in range(layers):
+            modules.extend([nn.Linear(dim, dim), nn.ReLU()])
+        self.mod = nn.Sequential(*modules)
+
+    def forward(self, x):
+        return SEPMFunction.apply(self.mod(x))
+
+
+
+class GraphPassWrapperTest(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 1
+
+    def test_order(self):
+        @graph_optimization_pass(
+            prerequisites=[],
+            apply_after=[],
+        )
+        def my_pass1(gm) -> None:
+            return
+
+        @graph_optimization_pass(
+            prerequisites=[my_pass1],
+            apply_after=[],
+        )
+        def my_pass2(gm) -> None:
+            return
+
+        @graph_optimization_pass(
+            prerequisites=[],
+            apply_after=[my_pass1],
+        )
+        def my_pass3(gm) -> None:
+            return
+
+        gm = MagicMock(spec=IterGraphModule)
+        # No errors happen.
+        my_pass1(gm)
+        my_pass3(gm)
+        my_pass2(gm)
+        _optimized_func.clear()
+
+        # Only my_pass3 is okay as it has no prerequisites.
+        my_pass3(gm)
+        _optimized_func.clear()
+
+        # Prerequisite condition does not match.
+        with self.assertRaisesRegex(AssertionError, "are the prerequisites of"):
+            my_pass2(gm)
+        _optimized_func.clear()
+
+        # my_pass3 must be applied after my_pass1
+        with self.assertRaisesRegex(AssertionError, "must be applied after"):
+            my_pass3(gm)
+            my_pass1(gm)
+        _optimized_func.clear()
+
+
+class TransformationTest(DTensorTestBase):
+    @property
+    def world_size(self):
+        return 2
+
+    def _init(self, batch_size, layers, dim, foreach: bool = False, fused: bool = True):
+        torch.manual_seed(0)
+        model = DummyModel(layers, dim).cuda()
+        ddp_model = DDP(deepcopy(model), device_ids=[self.rank])
+        optim = torch.optim.Adam(
+            model.parameters(), lr=0.01, foreach=foreach, fused=fused, capturable=True
+        )
+        ddp_optim = torch.optim.Adam(
+            ddp_model.parameters(),
+            lr=0.01,
+            foreach=foreach,
+            fused=fused,
+            capturable=True,
+        )
+        batch = torch.randn(batch_size, dim).cuda()
+
+        # materialize optimizer states
+        out = model(batch)
+        out.sum().backward()
+        optim.step()
+        optim.zero_grad()
+
+        ddp_out = ddp_model(batch)
+        ddp_out.sum().backward()
+        ddp_optim.step()
+        ddp_optim.zero_grad()
+
+        self.assertEqual(ddp_out, out)
+        self.assertEqual(list(ddp_model.parameters()), list(model.parameters()))
+        return model, optim, ddp_model, ddp_optim
+
+    def _test_train_step(
+        self, train_step, num_iters, batch_size, layers, dim, use_fused_optimizer=False
+    ):
+        def _ddp_train_step(model, optim, batch):
+            model(batch).sum().backward()
+            with torch.no_grad():
+                for p in model.parameters():
+                    p.grad *= self.world_size
+            optim.step()
+            optim.zero_grad()
+
+        model, optim, ddp_model, ddp_optim = self._init(
+            batch_size,
+            layers,
+            dim,
+            foreach=(not use_fused_optimizer),
+            fused=use_fused_optimizer,
+        )
+        for i in range(num_iters):
+            batch = torch.randn(batch_size, dim).cuda()
+            kwargs = {} if i < num_iters - 1 else {"last_train_step": True}
+            out = train_step(model, optim, batch, **kwargs)
+            ddp_out = _ddp_train_step(ddp_model, ddp_optim, batch)
+        self.assertEqual(list(ddp_model.parameters()), list(model.parameters()))
+
+    # @skip_if_lt_x_gpu(2)
+    # @with_comms
+    # def test_basic_transformation(self):
+    #     batch_size = 100
+    #     layers = 10
+    #     dim = 100
+    #     num_iters = 5
+
+    #     @compile(gm_transformation=GraphModuleTransformation(num_iters=num_iters))
+    #     def train_step(model, optim, batch):
+    #         model(batch).sum().backward()
+    #         optim.step()
+    #         optim.zero_grad()
+
+    #     self._test_tran_step_with_ddp(train_step, num_iters, batch_size, layers, dim)
+
+    # @unittest.skipIf(not has_triton(), "Inductor+gpu needs triton and recent GPU arch")
+    # @skip_if_lt_x_gpu(2)
+    # @with_comms
+    # def test_inductor(self):
+    #     batch_size = 100
+    #     layers = 10
+    #     dim = 100
+    #     num_iters = 5
+
+    #     @compile(
+    #         gm_transformation=GraphModuleTransformation(
+    #             num_iters=num_iters, enable_inductor=True
+    #         )
+    #     )
+    #     def train_step(model, optim, batch):
+    #         model(batch).sum().backward()
+    #         optim.step()
+    #         optim.zero_grad()
+
+    #     # TODO: there are issues when lowering the optimizer. Disable
+    #     # the test for now.
+    #     """
+    #     self._test_tran_step_with_ddp(
+    #         train_step, num_iters, batch_size, layers, dim
+    #     )
+    #     """
+
+    # @skip_if_lt_x_gpu(2)
+    # @with_comms
+    # def test_graph_optimization_with_foreach(self):
+    #     batch_size = 100
+    #     layers = 2
+    #     dim = 4096
+    #     num_iters = 5
+
+    #     @compile(
+    #         gm_transformation=GraphModuleTransformation(
+    #             num_iters=num_iters,
+    #             enable_graph_optimization=True,
+    #             dump_graphs=False,
+    #         )
+    #     )
+    #     def train_step(model, optim, batch):
+    #         model(batch).sum().backward()
+    #         optim.step()
+    #         optim.zero_grad()
+
+    #     self._test_tran_step_with_ddp(train_step, num_iters, batch_size, layers, dim)
+
+    # @skip_if_lt_x_gpu(2)
+    # @with_comms
+    # def test_graph_optimization_with_fused(self):
+    #     batch_size = 100
+    #     layers = 2
+    #     dim = 4096
+    #     num_iters = 5
+
+    #     @compile(
+    #         gm_transformation=GraphModuleTransformation(
+    #             num_iters=num_iters,
+    #             enable_graph_optimization=True,
+    #             dump_graphs=False,
+    #         )
+    #     )
+    #     def train_step(model, optim, batch):
+    #         model(batch).sum().backward()
+    #         optim.step()
+    #         optim.zero_grad()
+
+    #     model, optim, _, _ = self._init(
+    #         batch_size, layers, dim, foreach=False, fused=True
+    #     )
+    #     for _ in range(num_iters):
+    #         batch = torch.randn(batch_size, dim).cuda()
+            # out = train_step(model, optim, batch)
+
+    # @skip_if_lt_x_gpu(2)
+    # @with_comms
+    # def test_graph_profiling_with_foreach(self):
+    #     batch_size = 100
+    #     layers = 2
+    #     dim = 4096
+    #     num_iters = 5
+
+    #     @compile(
+    #         gm_transformation=GraphModuleTransformation(
+    #             num_iters=num_iters,
+    #             enable_graph_optimization=True,
+    #             enable_profiling=True,
+    #             dump_graphs=False,
+    #         )
+    #     )
+    #     def train_step(model, optim, batch):
+    #         model(batch).sum().backward()
+    #         optim.step()
+    #         optim.zero_grad()
+
+    #     self._test_tran_step_with_ddp(train_step, num_iters, batch_size, layers, dim)
+
+    @skip_if_lt_x_gpu(2)
+    @skipIfRocm
+    @with_comms
+    def test_graph_profiling_with_fused(self):
+        batch_size = 100
+        layers = 2
+        dim = 4096
+        num_iters = 5
+
+        @compile(
+            gm_transformation=GraphModuleTransformation(
+                enable_graph_optimization=True,
+                enable_profiling=True,
+                dump_graphs=False,
+            )
+        )
+        def train_step(model, optim, batch):
+            model(batch).sum().backward()
+            optim.step()
+            optim.zero_grad()
+
+        self._test_tran_step_with_ddp(train_step, num_iters, batch_size, layers, dim)
+
+if __name__ == "__main__":
+    if False:
+        run_tests()
