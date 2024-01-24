@@ -1,27 +1,16 @@
 from copy import deepcopy
 from functools import wraps
-from unittest.mock import MagicMock
 import os
 import logging
 import torch.multiprocessing as mp
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from torch.fx.experimental.proxy_tensor import make_fx
 from torch.distributed._functional_collectives import all_reduce
 from torch.distributed._spmd.api import compile
 from torch.distributed._spmd.parallel_mode import DataParallel
 from torch.distributed._spmd.gm_transformation import GraphModuleTransformation
-from torch.distributed._spmd.graph_optimization import (
-    _optimized_func,
-    comm_fusion_with_concat,
-    find_all_descendants,
-    get_all_fused_optimizer_blocks,
-    graph_optimization_pass,
-    iter_move_grads_and_optimizers,
-    remove_copy_from_optimizer,
-    schedule_comm_wait,
-    split_fused_optimizer,
-)
 from torch.distributed._spmd.graph_utils import find_node
 from torch.distributed._spmd.iter_graph_module import IterGraphModule
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -76,8 +65,10 @@ def run_worker(rank, world_size):
     #         fused=True,
     #         capturable=True,
     #     )
-    compiled_fn = compile(gm_transformation=GraphModuleTransformation())(train_step)
-    compiled_fn(model, optim, batch)
+    # compiled_fn = compile(gm_transformation=GraphModuleTransformation())(train_step)
+    # compiled_fn(model, optim, batch)
+    gm = make_fx(train_step)(model, optim, batch)
+    print(gm.graph)
 
 
 if __name__ == "__main__":
