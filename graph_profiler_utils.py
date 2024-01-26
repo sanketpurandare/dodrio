@@ -71,8 +71,6 @@ class BiDict(MutableMapping[KT, VT]):
         return self.data.items()
 
 
-
-
 class ProfileMode(str, Enum):
     r"""
     ProfileMode : The Graph Profiler provides three profiling
@@ -130,8 +128,7 @@ def get_tensor_stats(tensor: torch.Tensor) -> Tuple[Tuple[int, ...], int, int]:
     fact_memory_size = fact_numel * element_size
     # rounding up to pytorch's allocation granularity
     memory_size = (
-        math.ceil(fact_memory_size / PYTORCH_MIN_ALLOCATE)
-        * PYTORCH_MIN_ALLOCATE
+        math.ceil(fact_memory_size / PYTORCH_MIN_ALLOCATE) * PYTORCH_MIN_ALLOCATE
     )
     return (size, numel, memory_size)
 
@@ -176,12 +173,13 @@ class NodeInfo:
     last_back_access: Optional[fx.Node] = None
     # Populated during scheduling algorithm (Future use)
     intermediate_mem: float = 0.0
-    last_forward_uses:List[fx.Node] = field(default_factory=list)
-    first_back_uses:List[fx.Node] = field(default_factory=list)
+    last_forward_uses: List[fx.Node] = field(default_factory=list)
+    first_back_uses: List[fx.Node] = field(default_factory=list)
     to_offload: List[fx.Node] = field(default_factory=list)
     to_prefetch: List[fx.Node] = field(default_factory=list)
     to_recompute: List[fx.Node] = field(default_factory=list)
     to_delete: List[fx.Node] = field(default_factory=list)
+
 
 @dataclass
 class IntermediateNodeInfo(NodeInfo):
@@ -237,8 +235,8 @@ class ProfInfo:
     def __init__(
         self,
         run_time: float,
-        cuda_time:float,
-        cpu_time:float,
+        cuda_time: float,
+        cpu_time: float,
         peak_mem: int,
         active_mem: int,
         is_int_node: bool,

@@ -13,6 +13,7 @@ from .graph_utils import get_output, OP, replace_subsequent_uses_of
 # recompute ratio metric which is activation_size/compute_time.
 # Higher ratio imples that we can recompute activations with lower overhead.
 
+
 class Capuchin:
     def __init__(
         self,
@@ -25,7 +26,6 @@ class Capuchin:
         self._populate_prof_info()
 
     def _populate_prof_info(self):
-
         self.node_info = self.graph_profiler.node_info
         self.intermediate_nodes = self.graph_profiler.intermediate_nodes
         self.peak_end = self.graph_profiler.peak_end
@@ -103,7 +103,7 @@ class Capuchin:
         # 1) Find the activations that no other activation recomputes in its lineage
         # 2) Find the earliest recomputable activation and add the current activation to it's output set
         top_recomps: List[fx.Node] = []
-        recomputed_intermediates:List[fx.Node] = []
+        recomputed_intermediates: List[fx.Node] = []
 
         for rp in self.recomps:
             recomputed_intermediates.extend(self.node_info[rp].rcomp_intermediates)
@@ -116,14 +116,20 @@ class Capuchin:
         rem_recomps = self.recomps - top_recomps
 
         for r in rem_recomps:
-            ancestors:List[fx.Node] = []
+            ancestors: List[fx.Node] = []
             for ac in top_recomps:
-                ac_info:IntNodeInfo = self.node_info[ac]
+                ac_info: IntNodeInfo = self.node_info[ac]
                 if r in ac_info.rcomp_intermediates:
                     ancestors.add(ac)
-            list.sort(ancestors, key = lambda n: self.node_info[self.node_info[n].first_back_access].rank)
+            list.sort(
+                ancestors,
+                key=lambda n: self.node_info[self.node_info[n].first_back_access].rank,
+            )
             top_ancestor = ancestors.pop(0)
-            assert(self.node_info[self.node_info[top_ancestor].first_back_access].rank < self.node_info[self.node_info[r].first_back_access].rank)
+            assert (
+                self.node_info[self.node_info[top_ancestor].first_back_access].rank
+                < self.node_info[self.node_info[r].first_back_access].rank
+            )
             anc_info: IntNodeInfo = self.node_info[top_ancestor]
             anc_info.rcomp_outs.append(r)
 
@@ -133,12 +139,14 @@ class Capuchin:
 
         self.req_recomps = top_recomps
 
-
     def _rewrite_graph(self) -> None:
-        remap:Dict[str, fx.Node] = {}
+        remap: Dict[str, fx.Node] = {}
         for node in self.gm.graph.nodes:
             remap[node.name] = node
-        list.sort(self.req_recomps, key = lambda n: self.node_info[self.node_info[n].first_back_access].rank)
+        list.sort(
+            self.req_recomps,
+            key=lambda n: self.node_info[self.node_info[n].first_back_access].rank,
+        )
         for rp in self.req_recomps:
             rp_info: IntNodeInfo = self.node_info[rp]
             rcomp_graph = _extract_graph_with_inputs_outputs(
@@ -150,17 +158,23 @@ class Capuchin:
             print(rcomp_graph)
             output = get_output(rcomp_graph)
             output_args = output.all_input_nodes
-            first_back_access:fx.Node = self.node_info[rp].first_back_access
+            first_back_access: fx.Node = self.node_info[rp].first_back_access
             with self.gm.graph.inserting_before(first_back_access):
                 for n in rcomp_graph.nodes:
                     if n.op == OP.PLACEHOLDER or n.op == OP.OUTPUT:
                         continue
                     else:
-                        new_node = self.gm.graph.node_copy(n, arg_transform= lambda x : remap[x.name])
+                        new_node = self.gm.graph.node_copy(
+                            n, arg_transform=lambda x: remap[x.name]
+                        )
                         if n in output_args:
                             new_intermediate_node = new_node
                             old_intermediate_node = remap[n.name]
-                            replace_subsequent_uses_of(self.gm.graph, old_intermediate_node, new_intermediate_node)
+                            replace_subsequent_uses_of(
+                                self.gm.graph,
+                                old_intermediate_node,
+                                new_intermediate_node,
+                            )
                         remap[n.name] = new_node
         rebuild_graph(self.gm)
 

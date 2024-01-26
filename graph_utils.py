@@ -148,7 +148,10 @@ def dump_graphs_to_files(graphs: Dict[str, fx.GraphModule], folder: str = "") ->
 
     return folder
 
-def replace_subsequent_uses_of(graph:fx.Graph, old_node:fx.Node, new_node:fx.Node)->None:
+
+def replace_subsequent_uses_of(
+    graph: fx.Graph, old_node: fx.Node, new_node: fx.Node
+) -> None:
     old_node_users = old_node.users
     for node in reversed(graph.nodes):
         if node == new_node:

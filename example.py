@@ -15,6 +15,7 @@ from torch.distributed._spmd.graph_utils import find_node
 from torch.distributed._spmd.iter_graph_module import IterGraphModule
 from torch.nn.parallel import DistributedDataParallel as DDP
 
+
 class DummyModel(nn.Module):
     def __init__(self, layers: int, dim: int):
         super().__init__()
@@ -27,16 +28,17 @@ class DummyModel(nn.Module):
         return self.mod(x)
 
 
-def train_step(model: torch.nn.Module, optim: torch.optim.Optimizer, batch: torch.Tensor):
-    out:torch.Tensor = model(batch)
+def train_step(
+    model: torch.nn.Module, optim: torch.optim.Optimizer, batch: torch.Tensor
+):
+    out: torch.Tensor = model(batch)
     out.sum().backward()
     optim.step()
     optim.zero_grad()
 
 
 def run_worker(rank, world_size):
-    logging.getLogger().setLevel(logging.DEBUG if rank == 0 else
-    logging.CRITICAL)
+    logging.getLogger().setLevel(logging.DEBUG if rank == 0 else logging.CRITICAL)
     # logging.getLogger().setLevel(logging.DEBUG)
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
     logging.info(f"Number of visible devices:  {torch.cuda.device_count()}")
@@ -49,13 +51,12 @@ def run_worker(rank, world_size):
     model = DummyModel(dim=dim, layers=layers).cuda()
     batch = torch.randn(batch_size, dim).cuda()
     optim = torch.optim.Adam(
-            model.parameters(), lr=0.01, foreach=False, fused=True, capturable=True
-        )
+        model.parameters(), lr=0.01, foreach=False, fused=True, capturable=True
+    )
 
     for param in model.parameters():
         if param.requires_grad:
             param.register_hook(call_all_reduce)
-
 
     # ddp_model = DDP(deepcopy(model), device_ids=[rank])
     # ddp_optim = torch.optim.Adam(
@@ -77,6 +78,7 @@ if __name__ == "__main__":
     world_size = 2
     mp.spawn(run_worker, args=(world_size,), nprocs=world_size, join=True)
 
-def call_all_reduce(grad:torch.Tensor):
+
+def call_all_reduce(grad: torch.Tensor):
     print("This was called.")
     return all_reduce(grad, reduceOp="sum", group=dist.group.WORLD)

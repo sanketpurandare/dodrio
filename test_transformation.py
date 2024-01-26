@@ -48,6 +48,7 @@ def with_comms(func):
 
     return wrapper
 
+
 def sepm(x: torch.Tensor) -> torch.Tensor:
     return x
 
@@ -89,6 +90,7 @@ class SEPMFunction(torch.autograd.Function):
     def backward(ctx: Any, grad_x: torch.Tensor) -> torch.Tensor:
         return torch.ops.separator.sepm_backward(grad_x)
 
+
 class DummyModel(nn.Module):
     def __init__(self, layers: int, dim: int):
         super().__init__()
@@ -99,7 +101,6 @@ class DummyModel(nn.Module):
 
     def forward(self, x):
         return SEPMFunction.apply(self.mod(x))
-
 
 
 class GraphPassWrapperTest(DTensorTestBase):
@@ -303,7 +304,7 @@ class TransformationTest(DTensorTestBase):
     #     )
     #     for _ in range(num_iters):
     #         batch = torch.randn(batch_size, dim).cuda()
-            # out = train_step(model, optim, batch)
+    # out = train_step(model, optim, batch)
 
     # @skip_if_lt_x_gpu(2)
     # @with_comms
@@ -350,6 +351,7 @@ class TransformationTest(DTensorTestBase):
             optim.zero_grad()
 
         self._test_tran_step_with_ddp(train_step, num_iters, batch_size, layers, dim)
+
 
 if __name__ == "__main__":
     if False:

@@ -20,8 +20,10 @@ from torch.testing._internal.distributed._tensor.common_dtensor import (
     with_comms,
 )
 
+
 def sep(x: torch.Tensor) -> torch.Tensor:
     return x
+
 
 def sep_backward(grad: torch.Tensor) -> torch.Tensor:
     return grad
@@ -59,6 +61,7 @@ class SEPFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx: Any, grad_x: torch.Tensor) -> torch.Tensor:
         return torch.ops.separator.sep_backward(grad_x)
+
 
 class SimpleMLP(nn.Module):
     def __init__(self):
@@ -120,9 +123,11 @@ class TestDataParallel(DTensorTestBase):
         ddp_opt.step()
 
         # compile it with replicate and run step once
-        compiled_fn = compile(parallel_mode=DataParallel(parallel_style=data_parallel_mode, _preserve_node_type=True))(
-            train_step
-        )
+        compiled_fn = compile(
+            parallel_mode=DataParallel(
+                parallel_style=data_parallel_mode, _preserve_node_type=True
+            )
+        )(train_step)
         compiled_fn(mod, opt, inp)
 
         for p1, p2 in zip(mod.parameters(), ddp_mod.parameters()):

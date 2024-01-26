@@ -65,7 +65,7 @@ class GraphProfiler(fx.Interpreter):
         logging.info("Initializing Graph Profiler")
         self.prefix_str = "iter_graph_profiler"
         self.sync = sync
-        self.node_info:Dict[fx.Node, NodeInfo] = {}
+        self.node_info: Dict[fx.Node, NodeInfo] = {}
         self.profile_mode = profile_mode
 
         self.total_runtime_sec: List[float] = []
@@ -81,9 +81,9 @@ class GraphProfiler(fx.Interpreter):
         self.intermediate_nodes: List[fx.Node] = []
         self.torch_profiler: Optional[torch.profiler.profile] = None
         self.needs_summary: bool = True
-        self.param_grad_map:BiDict[fx.Node, fx.Node] = BiDict()
-        self.params:List[fx.Node] = []
-        self.grads:List[fx.Node] = []
+        self.param_grad_map: BiDict[fx.Node, fx.Node] = BiDict()
+        self.params: List[fx.Node] = []
+        self.grads: List[fx.Node] = []
         self.env = {}
 
         # Can define any variables that you need to measure the runtime events
@@ -106,18 +106,21 @@ class GraphProfiler(fx.Interpreter):
             rank += 1
             self.node_info[node] = n_info
 
-        #Find the forward end and backward start dummy nodes
-            if node.name == "sep" and node.target==torch.ops.separator.sep.default:
+            # Find the forward end and backward start dummy nodes
+            if node.name == "sep" and node.target == torch.ops.separator.sep.default:
                 self.forward_end = node
-            elif node.name == "sep_backward" and node.target==torch.ops.separator.sep_backward.default:
+            elif (
+                node.name == "sep_backward"
+                and node.target == torch.ops.separator.sep_backward.default
+            ):
                 self.backward_start = node
-        #We define intermediate nodes as the nodes that are generated during forward pass
+        # We define intermediate nodes as the nodes that are generated during forward pass
         # and also used in the backward pass
 
         for node in self.gm.graph.nodes:
             if self.node_info[node].node_type == NodeType.ACT:
                 users = node.users
-                #from the users we get the last forward use
+                # from the users we get the last forward use
                 # and the first backward use using ranks
                 last_forward = None
                 first_backward = None
@@ -140,10 +143,13 @@ class GraphProfiler(fx.Interpreter):
                     self.node_info[node].first_back_access = first_backward
                     self.node_info[node].last_forward_access = last_forward
 
-            elif self.node_info[node].node_type == NodeType.PARAM and node.op == OP.PLACEHOLDER:
+            elif (
+                self.node_info[node].node_type == NodeType.PARAM
+                and node.op == OP.PLACEHOLDER
+            ):
                 self.params.append(node)
                 users = node.users
-                #from users we get the first use of the parameter in the forward pass
+                # from users we get the first use of the parameter in the forward pass
                 first_forward = None
                 for user in users:
                     u_info = self.node_info[user]
@@ -157,12 +163,12 @@ class GraphProfiler(fx.Interpreter):
 
             elif self.node_info[node].node_type == NodeType.GRAD:
                 if node.target == torch.ops.c10d_functional.all_reduce.default:
-                    #get the first argument of the all_reduce node
+                    # get the first argument of the all_reduce node
                     self.grads.append(node.args[0])
 
         assert len(self.params) == len(self.grads)
 
-        for param,grad in zip(self.params, self.grads):
+        for param, grad in zip(self.params, self.grads):
             self.param_grad_map[param] = grad
 
         for i_node in self.intermediate_nodes:
@@ -240,7 +246,10 @@ class GraphProfiler(fx.Interpreter):
             return super().run_node(node)
 
         # Preftech the tensors that have been offloaded and have their first uses.
-        if self.profile_mode == ProfileMode.swap and self.node_info[node].rank > self.node_info[self.backward_start].rank:
+        if (
+            self.profile_mode == ProfileMode.swap
+            and self.node_info[node].rank > self.node_info[self.backward_start].rank
+        ):
             self._swap_in_node(node)
 
         if self.profile_mode in [ProfileMode.swap, ProfileMode.memory]:
@@ -260,10 +269,8 @@ class GraphProfiler(fx.Interpreter):
             self.node_peak_mem.setdefault(node, [])
             self.node_peak_mem[node].append(mem_stats["active_bytes.all.peak"])
             self.node_active_mem.setdefault(node, [])
-            self.node_active_mem[node].append(
-                mem_stats["active_bytes.all.current"]
-            )
-            if  node in self.intermediate_nodes:
+            self.node_active_mem[node].append(mem_stats["active_bytes.all.current"])
+            if node in self.intermediate_nodes:
                 int_n_info = cast(IntermediateNodeInfo, self.node_info[node])
                 assert isinstance(return_val, torch.Tensor)
                 (
@@ -273,7 +280,10 @@ class GraphProfiler(fx.Interpreter):
                 ) = get_tensor_stats(return_val)
 
         # Offload the tensors that have last uses at this node during forward pass.
-        if self.profile_mode == ProfileMode.swap and self.node_info[node].rank < self.node_info[self.forward_end].rank:
+        if (
+            self.profile_mode == ProfileMode.swap
+            and self.node_info[node].rank < self.node_info[self.forward_end].rank
+        ):
             self._swap_out_node(node)
 
         return return_val
@@ -289,18 +299,14 @@ class GraphProfiler(fx.Interpreter):
 
     def get_idle_times(self) -> None:
         for i_node in self.intermediate_nodes:
-
             n_info: IntermediateNodeInfo = self.node_info[i_node]
             last_use = n_info.last_forward_access
             n_info.idle_time = self.total_runtime - (
-                self.node_info[last_use].cumulative_run_time
-                + n_info.swap_time
+                self.node_info[last_use].cumulative_run_time + n_info.swap_time
             )
 
             first_use = n_info.first_back_access
-            n_info.idle_time += self.node_info[
-                first_use
-            ].cumulative_run_time - (
+            n_info.idle_time += self.node_info[first_use].cumulative_run_time - (
                 self.node_info[first_use].run_time + n_info.swap_time
             )
 
@@ -324,9 +330,7 @@ class GraphProfiler(fx.Interpreter):
                     nodes_to_prefetch = self.node_info[node].first_back_uses
                     if nodes_to_prefetch is not None:
                         for p_node in nodes_to_prefetch:
-                            intermediate_mem -= self.node_info[
-                                p_node
-                            ].memory_size
+                            intermediate_mem -= self.node_info[p_node].memory_size
                 min_peak_mem = self.node_info[node].peak_mem
                 peak_mem = min_peak_mem + intermediate_mem
                 if peak_mem > MEM_LIMIT:
@@ -349,9 +353,7 @@ class GraphProfiler(fx.Interpreter):
                     nodes_to_offload = self.node_info[node].last_forward_uses
                     if nodes_to_offload is not None:
                         for o_node in nodes_to_offload:
-                            intermediate_mem += self.node_info[
-                                o_node
-                            ].memory_size
+                            intermediate_mem += self.node_info[o_node].memory_size
         else:
             peak_mem_usages = [
                 self.node_info[n].peak_mem
@@ -379,14 +381,12 @@ class GraphProfiler(fx.Interpreter):
                 self.runtimes_sec[n] = max(cpu_time, cuda_time) / 1000.0
         if self.profile_mode == ProfileMode.swap:
             for int_n in self.intermediate_nodes:
-                cuda_time, cpu_time = event_dict[
-                    f"{self.prefix_str}_{int_n.name}_swap"
-                ]
+                cuda_time, cpu_time = event_dict[f"{self.prefix_str}_{int_n.name}_swap"]
                 self.node_cuda_swaptime[int_n] = cuda_time / 1000.0
                 self.node_cpu_swaptime[int_n] = cpu_time / 1000.0
                 self.swaptimes_sec[int_n] = max(cpu_time, cuda_time) / 1000.0
 
-    def get_total_cumulative_run_time(self)->None:
+    def get_total_cumulative_run_time(self) -> None:
         self.total_runtime = 0
 
         for node in self.module.graph.nodes:
@@ -396,7 +396,7 @@ class GraphProfiler(fx.Interpreter):
             self.total_runtime += n_info.run_time
             n_info.cumulative_run_time = self.total_runtime
 
-    def calibrate_aggregate_stats(self)->None:
+    def calibrate_aggregate_stats(self) -> None:
         self.get_total_cumulative_run_time()
         self.get_idle_times()
         self.get_peakmem_usage()
@@ -503,7 +503,7 @@ class GraphProfiler(fx.Interpreter):
             node_summaries.append(val_list)
         return tabulate.tabulate(node_summaries, headers=headers)
 
-    def get_prof_stats(self)->Dict[str, ProfInfo]:
+    def get_prof_stats(self) -> Dict[str, ProfInfo]:
         profile_stats: Dict[str, ProfInfo] = {}
         for node, ninfo in self.node_info.items():
             if node in self.intermediate_nodes:
@@ -533,7 +533,7 @@ class GraphProfiler(fx.Interpreter):
 
         return profile_stats
 
-    def set_prof_stats(self, profile_stats:Dict[str, ProfInfo]) -> None:
+    def set_prof_stats(self, profile_stats: Dict[str, ProfInfo]) -> None:
         for node, ninfo in self.node_info.items():
             pinfo: ProfInfo = profile_stats[node.name]
             ninfo.run_time = pinfo.run_time
@@ -548,10 +548,13 @@ class GraphProfiler(fx.Interpreter):
                 ninfo.memory_size = pinfo.memory_size
                 ninfo.numel = pinfo.numel
 
-    def aggregate_prof_stats(self, profile_stats_list:List[Dict[str, ProfInfo]]) -> None:
-
+    def aggregate_prof_stats(
+        self, profile_stats_list: List[Dict[str, ProfInfo]]
+    ) -> None:
         for node, ninfo in self.node_info.items():
-            pinfos:List[ProfInfo] = [profile_stats[node.name] for profile_stats in profile_stats_list]
+            pinfos: List[ProfInfo] = [
+                profile_stats[node.name] for profile_stats in profile_stats_list
+            ]
             ninfo.run_time = mean([pinfo.run_time for pinfo in pinfos])
             ninfo.cuda_time = mean([pinfo.cuda_time for pinfo in pinfos])
             ninfo.cpu_time = mean([pinfo.cpu_time for pinfo in pinfos])
@@ -565,7 +568,6 @@ class GraphProfiler(fx.Interpreter):
                 ninfo.numel = max([pinfo.numel for pinfo in pinfos])
         self.calibrate_aggregate_stats()
 
-
     def save_node_info(self, mod_id: str):
         dirname = f"{PROF_DIR}/{mod_id}"
         if not os.path.exists(dirname):
@@ -575,7 +577,6 @@ class GraphProfiler(fx.Interpreter):
         with open(filename, "wb") as outp:
             pickle.dump(profile_stats, outp, pickle.HIGHEST_PROTOCOL)
 
-
     def load_prof_info(self, mod_id):
         dirname = f"{PROF_DIR}/{mod_id}"
         filename = f"{dirname}/{mod_id}.profinfo"
@@ -584,8 +585,9 @@ class GraphProfiler(fx.Interpreter):
         self.set_prof_stats(profile_stats)
         self.calibrate_aggregate_stats()
 
+
 class ProfilerEngine:
-    r""" It provides an API to initialize and run the graph profiler.
+    r"""It provides an API to initialize and run the graph profiler.
     It provides the run function which takes an optional
     argument for running warm-up iterations before doing the actual profiling.
     Args:
@@ -613,19 +615,16 @@ class ProfilerEngine:
 
     def __init__(
         self,
-        gm:fx.GraphModule,
+        gm: fx.GraphModule,
         warm_up_iters: int = 0,
         profile_iters: int = 1,
-        profile_mode:str = "default"
+        profile_mode: str = "default",
     ) -> None:
-
         self.gm = gm
         self.warm_up_iters = warm_up_iters
         self.profile_iters = profile_iters
         self.profile_mode = profile_mode
         self.graph_profiler = GraphProfiler(self.gm, False, self.profile_mode)
-
-
 
     def run(self, *args, **kwargs) -> None:
         r"""
@@ -671,8 +670,7 @@ class ProfilerEngine:
         dist.all_gather_object(object_list, prof_stats)
         self.graph_profiler.aggregate_prof_stats(object_list)
 
-
-    def summarize(self, to_aggregate:bool = False, to_print: bool = False) -> None:
+    def summarize(self, to_aggregate: bool = False, to_print: bool = False) -> None:
         r"""
         Aggregates all the statistics accumulated during the profiling
         iterations and makes them ready for printing.
