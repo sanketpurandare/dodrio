@@ -16,7 +16,7 @@ from torch.distributed._spmd.data_parallel import NodeType
 from torch.fx.node import map_arg
 from torch.profiler import profile, ProfilerActivity, record_function, schedule
 
-from .graph_profiler_utils import (
+from graph_profiler_utils import (
     BiDict,
     get_tensor_stats,
     IntermediateNodeInfo,
@@ -25,9 +25,9 @@ from .graph_profiler_utils import (
     ProfInfo,
     TensorStatus,
 )
-from torch.distributed._spmd.graph_profiler_utils import BiDict, ProfInfo
+from graph_profiler_utils import BiDict, ProfInfo
 
-from .graph_utils import OP
+from graph_utils import OP
 
 MEM_LIMIT = 0
 PROF_DIR = "./"
@@ -92,17 +92,13 @@ class GraphProfiler(fx.Interpreter):
 
     def _init_node_info(self) -> None:
         print(self.gm.graph)
-        # For the intermediate nodes obtain their last use in the forward
-        # pass excluding the output node
+        # Assign ranks to nodes according to the graph topological order and
+        # create a NodeInfo object for each node. 
         rank = 0
         for node in self.gm.graph.nodes:
-            node_type = node.meta["node_type"]
-            if node_type == NodeType.ACT:
-                n_info = IntermediateNodeInfo()
-            else:
-                n_info = NodeInfo()
+            node:fx.Node = node
+            n_info = NodeInfo()
             n_info.rank = rank
-            n_info.node_type = node.meta["node_type"]
             rank += 1
             self.node_info[node] = n_info
 
@@ -114,11 +110,48 @@ class GraphProfiler(fx.Interpreter):
                 and node.target == torch.ops.separator.sep_backward.default
             ):
                 self.backward_start = node
+
+            # if node.target == torch.ops.c10d_functional.all_reduce.default:
+            #     input_node = node.all_input_nodes[0]
+            #     self.node_info[input_node].node_type = NodeType.GRAD
+            
+
+            if node.target == torch.ops.aten._fused_adam.default:
+                param_adam_args = node.args[0]
+                wait_adam_args = node.args[1]
+
+                
+                assert len(param_adam_args) == len(wait_adam_args), "The length of params and grads should be the same"
+                grad_adam_args= []
+
+                for wait_node in wait_adam_args:
+                    assert isinstance(wait_node, fx.Node), "Expected wait to be an fx.Node instance"
+                    assert wait_node.target == torch.ops.c10d_functional.wait_tensor.default, "Should have been a wait node"
+                    all_red_node = wait_node.all_input_nodes[0]
+                    grad = all_red_node.all_input_nodes[0]
+                    self.node_info[grad].node_type = NodeType.GRAD
+                    grad_adam_args.append(grad)
+
+                for param in param_adam_args:
+                    assert isinstance(param, fx.Node), "Expected param to be an fx.Node instance"
+                    assert param.op == OP.PLACEHOLDER, "Expected all params nodes to be of type PLACEHOLDER"
+                    self.node_info[param].node_type = NodeType.PARAM
+
+                for param, grad in zip(param_adam_args, grad_adam_args):
+                    self.param_grad_map[param] = grad
+
+                print(param_adam_args, grad_adam_args)
+
+
+
+            
+            
+                
         # We define intermediate nodes as the nodes that are generated during forward pass
         # and also used in the backward pass
 
         for node in self.gm.graph.nodes:
-            if self.node_info[node].node_type == NodeType.ACT:
+            if node.op != OP.PLACEHOLDER and self.node_info[node].rank < self.node_info[self.forward_end].rank:
                 users = node.users
                 # from the users we get the last forward use
                 # and the first backward use using ranks
@@ -137,7 +170,12 @@ class GraphProfiler(fx.Interpreter):
                         elif self.node_info[first_backward].rank < u_info.rank:
                             first_backward = user
                 if last_forward is not None and first_backward is not None:
+                    n_info = self.node_info[node]
+                    self.node_info[node] = IntermediateNodeInfo()
+                    self.node_info[node].rank = n_info.rank
+                    n_info = None
                     self.intermediate_nodes.append(node)
+                    self.node_info[node].node_type = NodeType.ACT
                     self.node_info[last_forward].last_forward_uses.append(node)
                     self.node_info[first_backward].first_back_uses.append(node)
                     self.node_info[node].first_back_access = first_backward
@@ -147,7 +185,6 @@ class GraphProfiler(fx.Interpreter):
                 self.node_info[node].node_type == NodeType.PARAM
                 and node.op == OP.PLACEHOLDER
             ):
-                self.params.append(node)
                 users = node.users
                 # from users we get the first use of the parameter in the forward pass
                 first_forward = None
@@ -161,18 +198,10 @@ class GraphProfiler(fx.Interpreter):
                 if first_forward is not None:
                     self.node_info[node].first_forward_access = first_forward
 
-            elif self.node_info[node].node_type == NodeType.GRAD:
-                if node.target == torch.ops.c10d_functional.all_reduce.default:
-                    # get the first argument of the all_reduce node
-                    self.grads.append(node.args[0])
 
-        assert len(self.params) == len(self.grads)
 
-        for param, grad in zip(self.params, self.grads):
-            self.param_grad_map[param] = grad
-
-        for i_node in self.intermediate_nodes:
-            print(i_node.name)
+        i_node_names = [i_node.name for i_node in self.intermediate_nodes]
+        print(i_node_names)
 
     def meta_run(self, *args) -> Any:
         args_iter = iter(args)

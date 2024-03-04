@@ -16,8 +16,7 @@ from torchbenchmark.models import (
     hf_T5_large,
     timm_vision_transformer_large,
 )
-from torch.distributed._spmd.api import compile
-from torch.distributed._spmd.parallel_mode import DataParallel
+from graph_compiler import compile, SEPFunction
 from torch.fx.experimental.proxy_tensor import make_fx
 
 actual_model_names: List[str] = [
@@ -46,6 +45,13 @@ model_batch_sizes: Dict[str, int] = {
     "torchbenchmark.models.hf_T5.Model": 12,
 }
 
+# class WrappedDummyModel(nn.Module):
+#     def __init__(self, mod: nn.Module):
+#         super().__init__()
+#         self.mod = mod
+
+#     def forward(self, *args, **kwargs):
+#         return SEPFunction.apply(self.mod(*args, **kwargs))
 
 class Experiment:
     def __init__(self, model_name: str, batch_size: int, extra_args=[]):
@@ -58,6 +64,7 @@ class Experiment:
         )
         self.model = model.model
         self.model_type = type(model)
+
         self.batch_size = batch_size
         self.example_inputs = model.example_inputs
 
@@ -73,6 +80,7 @@ class Experiment:
                 model: nn.Module, optim: optim.Optimizer, example_inputs: Any
             ):
                 loss = model(**example_inputs).loss
+                loss = SEPFunction.apply(loss)
                 loss.backward()
                 optim.step()
 
@@ -89,6 +97,7 @@ class Experiment:
                 output = model(example_inputs)
                 target = self._gen_target(output.shape[0])
                 loss = self.loss_fn(output, target)
+                loss = SEPFunction.apply(loss)
                 loss.backward()
                 optim.step()
 
@@ -109,10 +118,15 @@ def run_worker(rank, world_size):
     torch.manual_seed(20)
 
     exp = Experiment(model_names[0], model_batch_sizes[model_names[0]])
-    compiled_gm = make_fx(
-        exp.train_step, tracing_mode="fake", _allow_non_fake_inputs=True
-    )(exp.model, exp.optimizer, exp.example_inputs)
-    print(compiled_gm.graph)
+
+
+    compiled_fn = compile()(exp.train_step)
+    compiled_fn(exp.model, exp.optimizer, exp.example_inputs)
+
+    # compiled_gm = make_fx(
+    #     exp.train_step, tracing_mode="fake", _allow_non_fake_inputs=True
+    # )(exp.model, exp.optimizer, exp.example_inputs)
+    # print(compiled_gm.graph)
 
 
 if __name__ == "__main__":

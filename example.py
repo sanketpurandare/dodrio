@@ -8,11 +8,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.fx.experimental.proxy_tensor import make_fx
 from torch.distributed._functional_collectives import all_reduce
-from torch.distributed._spmd.api import compile
-from torch.distributed._spmd.parallel_mode import DataParallel
-from torch.distributed._spmd.gm_transformation import GraphModuleTransformation
-from torch.distributed._spmd.graph_utils import find_node
-from torch.distributed._spmd.iter_graph_module import IterGraphModule
+from graph_compiler import compile
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 
@@ -66,10 +62,11 @@ def run_worker(rank, world_size):
     #         fused=True,
     #         capturable=True,
     #     )
-    # compiled_fn = compile(gm_transformation=GraphModuleTransformation())(train_step)
-    # compiled_fn(model, optim, batch)
-    gm = make_fx(train_step)(model, optim, batch)
-    print(gm.graph)
+    compiled_fn = compile()(train_step)
+    compiled_fn(model, optim, batch)
+
+    # gm = make_fx(train_step)(model, optim, batch)
+    # print(gm.graph)
 
 
 if __name__ == "__main__":
@@ -81,4 +78,4 @@ if __name__ == "__main__":
 
 def call_all_reduce(grad: torch.Tensor):
     print("This was called.")
-    return all_reduce(grad, reduceOp="sum", group=dist.group.WORLD)
+    return all_reduce(grad, reduceOp="avg", group=dist.group.WORLD)

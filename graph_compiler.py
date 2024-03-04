@@ -7,10 +7,12 @@ from dataclasses import dataclass
 
 # We need to import _functional_collectives to trigger op registration
 import torch.distributed._functional_collectives
+from torch.distributed._functional_collectives import all_reduce
 import torch.nn as nn
 import torch.optim as optim
 import torch.utils._pytree as pytree
 from torch import fx
+from torch.distributed._spmd.api import SPMD_DECOMP_TABLE
 from torch.fx.graph import _PyTreeCodeGen, _PyTreeInfo, CodeGen
 from typing import Any, Callable, List, Dict, Union, Optional
 from torch.nn.utils import stateless
@@ -20,6 +22,8 @@ from torch.distributed._tensor.ops.utils import register_prop_rule
 from torch.distributed._tensor.placement_types import DTensorSpec
 from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.fx.experimental.proxy_tensor import make_fx
+
+from graph_profiler import GraphProfiler
 
 
 def sep(x: torch.Tensor) -> torch.Tensor:
@@ -65,10 +69,10 @@ class SEPFunction(torch.autograd.Function):
 
 
 # Dummy op used by data parallel to tag gradients.
-_spmd_lib_def = torch.library.Library("_spmd", "DEF")
+_spmd_lib_def = torch.library.Library("dummy", "DEF")
 _spmd_lib_def.define("tag_grad(Tensor self) -> Tensor")
 
-_spmd_lib_impl = torch.library.Library("_spmd", "IMPL")
+_spmd_lib_impl = torch.library.Library("dummy", "IMPL")
 _spmd_lib_impl.impl("tag_grad", lambda x: x, "CompositeExplicitAutograd")
 
 
@@ -105,8 +109,10 @@ def _to_caller_flattened_graph_module(gm: fx.GraphModule) -> fx.GraphModule:
             out_spec=gm._graph._codegen.pytree_info.out_spec,
         )
     )
+    gm.graph.eliminate_dead_code()
     gm.recompile()
     return gm
+
 
 
 @contextmanager
@@ -118,15 +124,20 @@ def gradients_tagging(params: Dict[str, nn.Parameter]):
     It's safe to trace those hooks and we would remove those nodes later.
     """
 
-    tagging_hooks: List[RemovableHandle] = []
+    # tagging_hooks: List[RemovableHandle] = []
+    all_red_hooks: List[RemovableHandle] = []
     try:
         for p in params.values():
-            h = p.register_hook(lambda grad: torch.ops._spmd.tag_grad(grad))
-            tagging_hooks.append(h)
+            # h = p.register_hook(lambda grad: torch.ops.dummy.tag_grad(grad))
+            h2 = p.register_hook( lambda grad: all_reduce(grad, reduceOp="avg", group=dist.group.WORLD))
+            # tagging_hooks.append(h)
+            all_red_hooks.append(h2)
         yield
     finally:
         # remove those hooks after tracing
-        for h in tagging_hooks:
+        # for h in tagging_hooks:
+        #     h.remove()
+        for h in all_red_hooks:
             h.remove()
 
 
@@ -240,11 +251,13 @@ def _compile(func: Callable, *args: Any, **kwargs: Any):
     args = pytree.tree_map_only(torch.Tensor, _get_fake_args, args)
     kwargs = pytree.tree_map_only(torch.Tensor, _get_fake_args, kwargs)
 
-    gm = make_fx(
-        partial(stateless_func, func),
-        tracing_mode=tracing_mode,
-        _allow_non_fake_inputs=False,
-    )(params, buffers, named_states, args, kwargs)
+    with _enable_compile(), torch.autograd.detect_anomaly(check_nan=False):
+        gm = make_fx(
+            partial(stateless_func, func),
+            tracing_mode=tracing_mode,
+            decomposition_table=SPMD_DECOMP_TABLE,
+            _allow_non_fake_inputs=False,
+        )(params, buffers, named_states, args, kwargs)
 
     params_and_buffers: Dict[str, Union[torch.Tensor, nn.Parameter]] = {
         **params,
@@ -252,6 +265,23 @@ def _compile(func: Callable, *args: Any, **kwargs: Any):
     }
 
     flat_state, _ = pytree.tree_flatten([params_and_buffers, named_states])
+
+    for node in gm.graph.nodes:
+        if node.target == torch.ops.aten.detach.default:
+            input_node = node.all_input_nodes[0]
+            node.replace_all_uses_with(input_node)
+            if len(node.users) == 0:
+                gm.graph.erase_node(node)
+        if node.target == torch.ops.c10d_functional.wait_tensor.default:
+            all_red_node = node.all_input_nodes[0]
+            grad_node = all_red_node.all_input_nodes[0]
+            while(grad_node.target == torch.ops.c10d_functional.wait_tensor.default):
+                node.replace_all_uses_with(grad_node)
+                if (len(node.users) == 0):
+                    gm.graph.erase_node(node)
+                all_red_node = grad_node.all_input_nodes[0]
+                grad_node = all_red_node.all_input_nodes[0]
+                
     gm = _to_caller_flattened_graph_module(gm)
 
     return _CompiledResult(gm, mod, opt, flat_state)
@@ -290,7 +320,8 @@ def compile(
                 first_iter = True
                 compiled_obj = _compile(func, *args, **kwargs)
                 wrapper.__dict__[COMPILED_OBJECT_KEY] = compiled_obj
-
+            graph_prof = GraphProfiler(compiled_obj.gm)
+            # print(compiled_obj.gm.graph)
             flat_inps = compiled_obj.flat_state + pytree.tree_flatten([args, kwargs])[0]
             with torch.no_grad():
                 # N.B.: we don't need autograd as backward has already been

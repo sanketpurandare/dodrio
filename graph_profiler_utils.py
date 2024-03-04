@@ -17,7 +17,6 @@ from typing import (
 
 import torch
 import torch.fx as fx
-from torch.distributed._spmd.data_parallel import NodeType
 
 # some pytorch low-level memory management constant the minimal allocate memory
 # size (Byte)
@@ -102,6 +101,17 @@ class TensorStatus(Enum):
     deleted = auto()
     recomputed = auto()
 
+class NodeType(Enum):
+    """
+    NodeType is a enum that records the type of the tensors in the graph.
+    This is used to determine the data parallel strategy.
+    """
+
+    PARAM = 0
+    ACT = 1
+    GRAD = 2
+    STATE = 3
+    NON_TENSOR = 4  # NON_TENSOR is to tag non tensor node (i.e. graph output)
 
 def same_storage(x: torch.Tensor, y: torch.Tensor) -> bool:
     return x.storage().data_ptr() == y.storage().data_ptr()
