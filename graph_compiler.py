@@ -1,79 +1,26 @@
-import torch
-import torch.distributed as dist
 from contextlib import contextmanager, nullcontext
 from copy import copy
-from functools import partial, wraps
 from dataclasses import dataclass
+from functools import partial, wraps
+from typing import Any, Callable, Dict, List, Optional, Union
 
+import torch
+import torch.distributed as dist
 # We need to import _functional_collectives to trigger op registration
 import torch.distributed._functional_collectives
-from torch.distributed._functional_collectives import all_reduce
 import torch.nn as nn
 import torch.optim as optim
 import torch.utils._pytree as pytree
 from torch import fx
-from torch.distributed._spmd.api import SPMD_DECOMP_TABLE
-from torch.fx.graph import _PyTreeCodeGen, _PyTreeInfo, CodeGen
-from typing import Any, Callable, List, Dict, Union, Optional
+from torch._subclasses.fake_tensor import FakeTensorMode
+from torch.distributed._functional_collectives import all_reduce
+from torch.fx.experimental.proxy_tensor import make_fx
+from torch.fx.graph import CodeGen, _PyTreeCodeGen, _PyTreeInfo
 from torch.nn.utils import stateless
 from torch.utils.hooks import RemovableHandle
-from torch.distributed._tensor.op_schema import OpSchema, OutputSharding
-from torch.distributed._tensor.ops.utils import register_prop_rule
-from torch.distributed._tensor.placement_types import DTensorSpec
-from torch._subclasses.fake_tensor import FakeTensorMode
-from torch.fx.experimental.proxy_tensor import make_fx
 
-from graph_profiler import GraphProfiler
-
-
-def sep(x: torch.Tensor) -> torch.Tensor:
-    return x
-
-
-def sep_backward(grad: torch.Tensor) -> torch.Tensor:
-    return grad
-
-
-separator_lib = torch.library.Library("separator", "DEF")
-separator_lib.define("sep(Tensor x) -> Tensor")
-separator_lib.impl("sep", sep, "CompositeExplicitAutograd")
-separator_lib.define("sep_backward(Tensor x) -> Tensor")
-separator_lib.impl("sep_backward", sep_backward, "CompositeExplicitAutograd")
-
-
-def _identity_prop_rule(op_schema: OpSchema) -> OutputSharding:
-    (x,) = op_schema.args_schema
-    assert isinstance(x, DTensorSpec), f"expecting DTensorSpec but got {x}"
-
-    return OutputSharding(output_spec=DTensorSpec(x.mesh, x.placements))
-
-
-@register_prop_rule(torch.ops.separator.sep.default)
-def _prop_sepm(op_schema: OpSchema) -> OutputSharding:
-    return _identity_prop_rule(op_schema)
-
-
-@register_prop_rule(torch.ops.separator.sep_backward.default)
-def _prop_sepm_backward(op_schema: OpSchema) -> OutputSharding:
-    return _identity_prop_rule(op_schema)
-
-
-class SEPFunction(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx: Any, x: torch.Tensor) -> torch.Tensor:
-        return torch.ops.separator.sep(x)
-
-    @staticmethod
-    def backward(ctx: Any, grad_x: torch.Tensor) -> torch.Tensor:
-        return torch.ops.separator.sep_backward(grad_x)
-
-
-# Dummy op used by data parallel to tag gradients.
-_spmd_lib_def = torch.library.Library("dummy", "DEF")
-_spmd_lib_def.define("tag_grad(Tensor self) -> Tensor")
-
-_spmd_lib_impl = torch.library.Library("dummy", "IMPL")
-_spmd_lib_impl.impl("tag_grad", lambda x: x, "CompositeExplicitAutograd")
+from graph_compiler_utils import SPMD_DECOMP_TABLE
+from graph_profiler import GraphProfiler, ProfilerEngine
 
 
 class _PyTreeCodeGenOutputsOnly(_PyTreeCodeGen):
@@ -114,7 +61,6 @@ def _to_caller_flattened_graph_module(gm: fx.GraphModule) -> fx.GraphModule:
     return gm
 
 
-
 @contextmanager
 def gradients_tagging(params: Dict[str, nn.Parameter]):
     """
@@ -129,7 +75,9 @@ def gradients_tagging(params: Dict[str, nn.Parameter]):
     try:
         for p in params.values():
             # h = p.register_hook(lambda grad: torch.ops.dummy.tag_grad(grad))
-            h2 = p.register_hook( lambda grad: all_reduce(grad, reduceOp="avg", group=dist.group.WORLD))
+            h2 = p.register_hook(
+                lambda grad: all_reduce(grad, reduceOp="avg", group=dist.group.WORLD)
+            )
             # tagging_hooks.append(h)
             all_red_hooks.append(h2)
         yield
@@ -275,13 +223,13 @@ def _compile(func: Callable, *args: Any, **kwargs: Any):
         if node.target == torch.ops.c10d_functional.wait_tensor.default:
             all_red_node = node.all_input_nodes[0]
             grad_node = all_red_node.all_input_nodes[0]
-            while(grad_node.target == torch.ops.c10d_functional.wait_tensor.default):
+            while grad_node.target == torch.ops.c10d_functional.wait_tensor.default:
                 node.replace_all_uses_with(grad_node)
-                if (len(node.users) == 0):
+                if len(node.users) == 0:
                     gm.graph.erase_node(node)
                 all_red_node = grad_node.all_input_nodes[0]
                 grad_node = all_red_node.all_input_nodes[0]
-                
+
     gm = _to_caller_flattened_graph_module(gm)
 
     return _CompiledResult(gm, mod, opt, flat_state)
@@ -320,9 +268,11 @@ def compile(
                 first_iter = True
                 compiled_obj = _compile(func, *args, **kwargs)
                 wrapper.__dict__[COMPILED_OBJECT_KEY] = compiled_obj
-            graph_prof = GraphProfiler(compiled_obj.gm)
-            # print(compiled_obj.gm.graph)
+            print(compiled_obj.gm.graph)
             flat_inps = compiled_obj.flat_state + pytree.tree_flatten([args, kwargs])[0]
+            # profiler_engine = ProfilerEngine(gm = compiled_obj.gm, profile_mode="default")
+            # profiler_engine.run(*flat_inps)
+            # profiler_engine.summarize(to_aggregate=True, to_print=True)
             with torch.no_grad():
                 # N.B.: we don't need autograd as backward has already been
                 # captured in the graph.

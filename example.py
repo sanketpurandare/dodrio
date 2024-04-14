@@ -1,15 +1,17 @@
+import logging
+import os
 from copy import deepcopy
 from functools import wraps
-import os
-import logging
-import torch.multiprocessing as mp
+
 import torch
 import torch.distributed as dist
+import torch.multiprocessing as mp
 import torch.nn as nn
-from torch.fx.experimental.proxy_tensor import make_fx
 from torch.distributed._functional_collectives import all_reduce
-from graph_compiler import compile
+from torch.fx.experimental.proxy_tensor import make_fx
 from torch.nn.parallel import DistributedDataParallel as DDP
+
+from graph_compiler import compile
 
 
 class DummyModel(nn.Module):

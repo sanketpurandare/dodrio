@@ -1,12 +1,13 @@
 from typing import Any, Dict, List, OrderedDict, Set, Tuple
 
 import torch.fx as fx
-from graph_profiling.graph_profiler_utils import IntNodeInfo, MEM_LIMIT, NodeInfo
+from graph_profiling.graph_profiler_utils import (MEM_LIMIT, IntNodeInfo,
+                                                  NodeInfo)
 from torch._functorch.partitioners import _extract_graph_with_inputs_outputs
 from torch.distributed._spmd.graph_profiler import GraphProfiler
 from torch.distributed._spmd.graph_utils import rebuild_graph
 
-from .graph_utils import get_output, OP, replace_subsequent_uses_of
+from .graph_utils import OP, get_output, replace_subsequent_uses_of
 
 ####################################################################################
 # Capuchin Algorithm greedily chooses activations to recompute based on the

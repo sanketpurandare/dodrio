@@ -2,12 +2,11 @@ import logging
 import os
 import tempfile
 from enum import Enum
-from typing import Callable, cast, Dict, Iterable, List, Set
+from typing import Callable, Dict, Iterable, List, Set, cast
 
 import torch.fx as fx
 from torch.fx.passes.shape_prop import TensorMetadata
 from torch.utils._pytree import tree_flatten, tree_unflatten
-
 
 logger: logging.Logger = logging.getLogger("graph_utils")
 

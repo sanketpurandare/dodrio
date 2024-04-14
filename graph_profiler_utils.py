@@ -1,19 +1,8 @@
 import math
 from dataclasses import dataclass, field
-from enum import auto, Enum
-from typing import (
-    Any,
-    Dict,
-    ItemsView,
-    Iterator,
-    KeysView,
-    List,
-    MutableMapping,
-    Optional,
-    Tuple,
-    TypeVar,
-    ValuesView,
-)
+from enum import Enum, auto
+from typing import (Any, Dict, ItemsView, Iterator, KeysView, List,
+                    MutableMapping, Optional, Tuple, TypeVar, ValuesView)
 
 import torch
 import torch.fx as fx
@@ -101,6 +90,7 @@ class TensorStatus(Enum):
     deleted = auto()
     recomputed = auto()
 
+
 class NodeType(Enum):
     """
     NodeType is a enum that records the type of the tensors in the graph.
@@ -112,6 +102,7 @@ class NodeType(Enum):
     GRAD = 2
     STATE = 3
     NON_TENSOR = 4  # NON_TENSOR is to tag non tensor node (i.e. graph output)
+
 
 def same_storage(x: torch.Tensor, y: torch.Tensor) -> bool:
     return x.storage().data_ptr() == y.storage().data_ptr()
@@ -133,8 +124,8 @@ def get_tensor_stats(tensor: torch.Tensor) -> Tuple[Tuple[int, ...], int, int]:
 
     size = tuple(tensor.size()) if tensor.dim() > 0 else (1,)
     numel = tensor.numel()
-    element_size = tensor.storage().element_size()
-    fact_numel = tensor.storage().size()
+    element_size = tensor.untyped_storage().element_size()
+    fact_numel = tensor.untyped_storage().size()
     fact_memory_size = fact_numel * element_size
     # rounding up to pytorch's allocation granularity
     memory_size = (
@@ -197,6 +188,17 @@ class IntermediateNodeInfo(NodeInfo):
     Derieved class to store the profiling and static graph analysis information
     for intermediate nodes (activations) in the graph.
     """
+
+    def __init__(self, n_info: NodeInfo = None):
+        if n_info is not None:
+            self.rank = n_info.rank
+            self.last_forward_uses = n_info.last_forward_uses
+            self.first_back_uses = n_info.first_back_uses
+            self.first_forward_access = n_info.first_forward_access
+            self.first_back_access = n_info.first_back_access
+            self.last_back_access = n_info.last_back_access
+            self.last_forward_access = n_info.last_forward_access
+
     # The idle time is calculated as [(last_backward_acess - swap_time) -
     # (last_forward_access + swap_time)].
     idle_time: float = 0.0

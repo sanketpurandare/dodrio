@@ -2,9 +2,11 @@
 # pyre-ignore-all-errors
 import logging
 import os
+import pdb
 from dataclasses import fields
-from typing import Any, Callable, cast, Dict, Iterator, List, Optional, Tuple
 from statistics import mean
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, cast
+
 import dill as pickle
 import torch
 import torch.distributed as dist
@@ -14,19 +16,11 @@ from torch import fx
 from torch.autograd.profiler_util import EventList
 from torch.distributed._spmd.data_parallel import NodeType
 from torch.fx.node import map_arg
-from torch.profiler import profile, ProfilerActivity, record_function, schedule
+from torch.profiler import ProfilerActivity, profile, record_function, schedule
 
-from graph_profiler_utils import (
-    BiDict,
-    get_tensor_stats,
-    IntermediateNodeInfo,
-    NodeInfo,
-    ProfileMode,
-    ProfInfo,
-    TensorStatus,
-)
-from graph_profiler_utils import BiDict, ProfInfo
-
+from graph_profiler_utils import (BiDict, IntermediateNodeInfo, NodeInfo,
+                                  ProfileMode, ProfInfo, TensorStatus,
+                                  get_tensor_stats)
 from graph_utils import OP
 
 MEM_LIMIT = 0
@@ -59,7 +53,7 @@ class GraphProfiler(fx.Interpreter):
     ):
         super().__init__(gm, True)
         self.gm = gm
-        print("Current Device: ", torch.cuda.current_device())
+        logging.info(f"Current Device:  {torch.cuda.current_device()}")
         torch.cuda.reset_peak_memory_stats()
 
         logging.info("Initializing Graph Profiler")
@@ -91,12 +85,12 @@ class GraphProfiler(fx.Interpreter):
         self._init_node_info()
 
     def _init_node_info(self) -> None:
-        print(self.gm.graph)
+        # print(self.gm.graph)
         # Assign ranks to nodes according to the graph topological order and
-        # create a NodeInfo object for each node. 
+        # create a NodeInfo object for each node.
         rank = 0
         for node in self.gm.graph.nodes:
-            node:fx.Node = node
+            node: fx.Node = node
             n_info = NodeInfo()
             n_info.rank = rank
             rank += 1
@@ -114,44 +108,56 @@ class GraphProfiler(fx.Interpreter):
             # if node.target == torch.ops.c10d_functional.all_reduce.default:
             #     input_node = node.all_input_nodes[0]
             #     self.node_info[input_node].node_type = NodeType.GRAD
-            
 
             if node.target == torch.ops.aten._fused_adam.default:
                 param_adam_args = node.args[0]
                 wait_adam_args = node.args[1]
 
-                
-                assert len(param_adam_args) == len(wait_adam_args), "The length of params and grads should be the same"
-                grad_adam_args= []
+                assert len(param_adam_args) == len(
+                    wait_adam_args
+                ), "The length of params and grads should be the same"
+                grad_adam_args = []
 
                 for wait_node in wait_adam_args:
-                    assert isinstance(wait_node, fx.Node), "Expected wait to be an fx.Node instance"
-                    assert wait_node.target == torch.ops.c10d_functional.wait_tensor.default, "Should have been a wait node"
+                    assert isinstance(
+                        wait_node, fx.Node
+                    ), "Expected wait to be an fx.Node instance"
+                    assert (
+                        wait_node.target
+                        == torch.ops.c10d_functional.wait_tensor.default
+                    ), "Should have been a wait node"
                     all_red_node = wait_node.all_input_nodes[0]
                     grad = all_red_node.all_input_nodes[0]
                     self.node_info[grad].node_type = NodeType.GRAD
                     grad_adam_args.append(grad)
 
                 for param in param_adam_args:
-                    assert isinstance(param, fx.Node), "Expected param to be an fx.Node instance"
-                    assert param.op == OP.PLACEHOLDER, "Expected all params nodes to be of type PLACEHOLDER"
+                    assert isinstance(
+                        param, fx.Node
+                    ), "Expected param to be an fx.Node instance"
+                    assert (
+                        param.op == OP.PLACEHOLDER
+                    ), "Expected all params nodes to be of type PLACEHOLDER"
                     self.node_info[param].node_type = NodeType.PARAM
 
                 for param, grad in zip(param_adam_args, grad_adam_args):
                     self.param_grad_map[param] = grad
 
-                print(param_adam_args, grad_adam_args)
+        logging.info(
+            f"Forward End: {self.forward_end.name} Rank: {self.node_info[self.forward_end].rank}"
+        )
+        logging.info(
+            f"Backward Start: {self.backward_start.name} Rank: {self.node_info[self.backward_start].rank}"
+        )
 
-
-
-            
-            
-                
         # We define intermediate nodes as the nodes that are generated during forward pass
         # and also used in the backward pass
 
         for node in self.gm.graph.nodes:
-            if node.op != OP.PLACEHOLDER and self.node_info[node].rank < self.node_info[self.forward_end].rank:
+            if (
+                node.op != OP.PLACEHOLDER
+                and self.node_info[node].rank < self.node_info[self.forward_end].rank
+            ):
                 users = node.users
                 # from the users we get the last forward use
                 # and the first backward use using ranks
@@ -167,12 +173,11 @@ class GraphProfiler(fx.Interpreter):
                     if u_info.rank > self.node_info[self.backward_start].rank:
                         if first_backward is None:
                             first_backward = user
-                        elif self.node_info[first_backward].rank < u_info.rank:
+                        elif self.node_info[first_backward].rank > u_info.rank:
                             first_backward = user
                 if last_forward is not None and first_backward is not None:
                     n_info = self.node_info[node]
-                    self.node_info[node] = IntermediateNodeInfo()
-                    self.node_info[node].rank = n_info.rank
+                    self.node_info[node] = IntermediateNodeInfo(n_info)
                     n_info = None
                     self.intermediate_nodes.append(node)
                     self.node_info[node].node_type = NodeType.ACT
@@ -180,6 +185,9 @@ class GraphProfiler(fx.Interpreter):
                     self.node_info[first_backward].first_back_uses.append(node)
                     self.node_info[node].first_back_access = first_backward
                     self.node_info[node].last_forward_access = last_forward
+                    logging.info(
+                        f"Intermediate Node: {node.name} First Backward: {first_backward.name} Last Forward: {last_forward.name}"
+                    )
 
             elif (
                 self.node_info[node].node_type == NodeType.PARAM
@@ -198,16 +206,11 @@ class GraphProfiler(fx.Interpreter):
                 if first_forward is not None:
                     self.node_info[node].first_forward_access = first_forward
 
-
-
-        i_node_names = [i_node.name for i_node in self.intermediate_nodes]
-        print(i_node_names)
-
     def meta_run(self, *args) -> Any:
         args_iter = iter(args)
         for n in self.module.graph.nodes:
             if n.op == OP.PLACEHOLDER:
-                self.env[n] = next(args_iter)
+                self.env[n] = next(args_iter, None)
         args = None
         return self.run([])
 
@@ -227,20 +230,22 @@ class GraphProfiler(fx.Interpreter):
         # 4) Delete the GPU tensor
         nodes_to_offload = self.node_info[node].last_forward_uses
         for o_node in nodes_to_offload:
-            cpu_ref: torch.Tensor = self.node_info[o_node].cpu_ref
+            o_info = cast(IntermediateNodeInfo, self.node_info[o_node])
+            cpu_ref: torch.Tensor = o_info.cpu_ref
             tensor = self.env[o_node]
             assert isinstance(tensor, torch.Tensor)
             if cpu_ref is None:
                 cpu_ref = torch.zeros(
                     tensor.size(), dtype=tensor.dtype, layout=tensor.layout
                 ).pin_memory()
-            assert cpu_ref.is_pinned
+            assert cpu_ref.is_pinned, f"CPU ref is not pinned for {o_node.name}"
+            logging.info(f"Swapping Out: {o_node.name}")
             with record_function(f"{self.prefix_str}_{o_node.name}_swap"):
                 cpu_ref = cpu_ref.copy_(tensor, False)
             if self.sync:
                 torch.cuda.synchronize()
-            self.node_info[o_node].status = TensorStatus.cpu
-            self.node_info[o_node].cpu_ref = cpu_ref
+            o_info.status = TensorStatus.cpu
+            o_info.cpu_ref = cpu_ref
             self.env[o_node] = cpu_ref
             del tensor
             tensor = None
@@ -255,20 +260,30 @@ class GraphProfiler(fx.Interpreter):
         # 4) Update the state of intermediate tensor in NodeInfo
         nodes_to_fetch = self.node_info[node].first_back_uses
         for p_node in nodes_to_fetch:
-            f_node = self.fwd_bwd_intermediate.inverse.get(p_node)[0]
-            assert isinstance(f_node, fx.Node)
-            n_info = cast(IntermediateNodeInfo, self.node_info[f_node])
-            n_info.status = TensorStatus.gpu
-            cpu_ref = cast(torch.Tensor, n_info.cpu_ref)
-            assert isinstance(cpu_ref, torch.Tensor) and cpu_ref.is_pinned
-            with record_function(f"{self.prefix_str}_{f_node.name}_swap"):
+            p_info = cast(IntermediateNodeInfo, self.node_info[p_node])
+            p_info.status = TensorStatus.gpu
+            cpu_ref = cast(torch.Tensor, p_info.cpu_ref)
+            # assert isinstance(cpu_ref, torch.Tensor), f"CPU ref is not a tensor for {p_node.name}"
+            assert cpu_ref.is_pinned, f"CPU ref is not pinned for {p_node.name}"
+            logging.info(f"Swapping In: {p_node.name}")
+            with record_function(f"{self.prefix_str}_{p_node.name}_swap"):
                 tensor = cpu_ref.to(
                     device=torch.cuda.current_device(),
                     memory_format=torch.preserve_format,
+                    non_blocking=False,
                 )
             self.env[p_node] = tensor.contiguous()
+            tensor = None
             if self.sync:
                 torch.cuda.synchronize()
+
+    def _verify_inputs_on_gpu(self, node: fx.Node):
+        for i_node in node.all_input_nodes:
+            in_value = self.env[i_node]
+            if isinstance(in_value, torch.Tensor):
+                assert (
+                    in_value.get_device() == torch.cuda.current_device()
+                ), f"Mismatch in device types for {i_node.name} which is the input of node {node.name}"
 
     def run_node(self, node: fx.Node) -> Any:
         if node.op == OP.PLACEHOLDER:
@@ -280,6 +295,7 @@ class GraphProfiler(fx.Interpreter):
             and self.node_info[node].rank > self.node_info[self.backward_start].rank
         ):
             self._swap_in_node(node)
+            self._verify_inputs_on_gpu(node)
 
         if self.profile_mode in [ProfileMode.swap, ProfileMode.memory]:
             torch.cuda.reset_peak_memory_stats()
@@ -328,7 +344,7 @@ class GraphProfiler(fx.Interpreter):
 
     def get_idle_times(self) -> None:
         for i_node in self.intermediate_nodes:
-            n_info: IntermediateNodeInfo = self.node_info[i_node]
+            n_info = cast(IntermediateNodeInfo, self.node_info[i_node])
             last_use = n_info.last_forward_access
             n_info.idle_time = self.total_runtime - (
                 self.node_info[last_use].cumulative_run_time + n_info.swap_time
@@ -342,9 +358,9 @@ class GraphProfiler(fx.Interpreter):
     def get_peakmem_usage(self) -> None:
         if self.profile_mode == ProfileMode.swap:
             intermediate_mem = 0
-            for i_node in self.intermediate_nodes:
-                n_info: IntermediateNodeInfo = self.node_info[i_node]
-                intermediate_mem += n_info.memory_size
+            # for i_node in self.intermediate_nodes:
+            #     n_info = cast(IntermediateNodeInfo, self.node_info[i_node])
+            #     intermediate_mem += n_info.memory_size
 
             self.peak_start = None
             self.peak_end = None
@@ -439,7 +455,7 @@ class GraphProfiler(fx.Interpreter):
             if node.op == OP.PLACEHOLDER:
                 continue
 
-            n_info: NodeInfo = self.node_info.setdefault(node, NodeInfo())
+            n_info = self.node_info[node]
             n_info.run_time = self.runtimes_sec.get(node, 1.0)
             n_info.cuda_time = self.node_cuda_time.get(node, 1.0)
             n_info.cpu_time = self.node_cpu_time.get(node, 1.0)
@@ -673,7 +689,7 @@ class ProfilerEngine:
                 warmup=self.warm_up_iters,
                 active=self.profile_iters,
             ),
-        ) as torch_prof:
+        ) as torch_prof, torch.no_grad():
             for i in range(2 + self.warm_up_iters + self.profile_iters):
                 if i == 0:
                     self.graph_profiler.torch_profiler = torch_prof
@@ -708,7 +724,8 @@ class ProfilerEngine:
         if to_aggregate:
             self._all_gather_node_info()
         if to_print:
-            print(self.graph_profiler.print_summary())
+            logging.info("\n")
+            logging.info(self.graph_profiler.print_summary())
 
     def reset_stats(self):
         r"""

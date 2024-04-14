@@ -1,23 +1,20 @@
-import os
+import importlib
 import logging
-import torch.multiprocessing as mp
+import os
+from typing import Any, Dict, List
+
 import torch
 import torch.distributed as dist
+import torch.multiprocessing as mp
 import torch.nn as nn
 import torch.optim as optim
-import importlib
-from typing import List, Dict, Any
-from torchbenchmark.util.model import BenchmarkModel
-from torchbenchmark.models import (
-    hf_GPT2,
-    hf_T5,
-    hf_GPT2_large,
-    hf_Bert,
-    hf_T5_large,
-    timm_vision_transformer_large,
-)
-from graph_compiler import compile, SEPFunction
 from torch.fx.experimental.proxy_tensor import make_fx
+from torchbenchmark.models import (hf_Bert, hf_GPT2, hf_GPT2_large, hf_T5,
+                                   hf_T5_large, timm_vision_transformer_large)
+from torchbenchmark.util.model import BenchmarkModel
+
+from graph_compiler import compile
+from graph_compiler_utils import SEPFunction
 
 actual_model_names: List[str] = [
     "hf_Bert",
@@ -53,6 +50,7 @@ model_batch_sizes: Dict[str, int] = {
 #     def forward(self, *args, **kwargs):
 #         return SEPFunction.apply(self.mod(*args, **kwargs))
 
+
 class Experiment:
     def __init__(self, model_name: str, batch_size: int, extra_args=[]):
         pos = model_name.rfind(".")
@@ -83,6 +81,7 @@ class Experiment:
                 loss = SEPFunction.apply(loss)
                 loss.backward()
                 optim.step()
+                optim.zero_grad()
 
             self.train_step = bert_train_step
             self.optimizer = model.optimizer
@@ -100,9 +99,16 @@ class Experiment:
                 loss = SEPFunction.apply(loss)
                 loss.backward()
                 optim.step()
+                optim.zero_grad()
 
             self.optimizer = model.cfg.optimizer
             self.train_step = timm_vit_train_step
+
+    def init_optimizer_states(self):
+        for param in self.model.parameters():
+            param.grad = torch.rand_like(param)
+        self.optimizer.step()
+        self.optimizer.zero_grad()
 
     def run(self):
         self.train_step(self.model, self.optimizer, self.example_inputs)
@@ -116,10 +122,10 @@ def run_worker(rank, world_size):
     logging.info(f"Number of visible devices:  {torch.cuda.device_count()}")
     torch.cuda.set_device(rank)
     torch.manual_seed(20)
+    logging.critical(f"Cuda device: {torch.cuda.current_device()}")
 
-    exp = Experiment(model_names[0], model_batch_sizes[model_names[0]])
-
-
+    exp = Experiment(model_names[3], model_batch_sizes[model_names[3]])
+    exp.init_optimizer_states()
     compiled_fn = compile()(exp.train_step)
     compiled_fn(exp.model, exp.optimizer, exp.example_inputs)
 
