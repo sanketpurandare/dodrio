@@ -12,10 +12,16 @@ from torch._inductor.utils import has_triton
 from torch.distributed._spmd.api import compile
 from torch.distributed._spmd.gm_transformation import GraphModuleTransformation
 from torch.distributed._spmd.graph_optimization import (
-    _optimized_func, comm_fusion_with_concat, find_all_descendants,
-    get_all_fused_optimizer_blocks, graph_optimization_pass,
-    iter_move_grads_and_optimizers, remove_copy_from_optimizer,
-    schedule_comm_wait, split_fused_optimizer)
+    _optimized_func,
+    comm_fusion_with_concat,
+    find_all_descendants,
+    get_all_fused_optimizer_blocks,
+    graph_optimization_pass,
+    iter_move_grads_and_optimizers,
+    remove_copy_from_optimizer,
+    schedule_comm_wait,
+    split_fused_optimizer,
+)
 from torch.distributed._spmd.graph_utils import find_node
 from torch.distributed._spmd.iter_graph_module import IterGraphModule
 from torch.distributed._tensor.op_schema import OpSchema, OutputSharding
@@ -24,10 +30,10 @@ from torch.distributed._tensor.placement_types import DTensorSpec
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.testing._internal.common_distributed import skip_if_lt_x_gpu
 from torch.testing._internal.common_utils import run_tests, skipIfRocm
-from torch.testing._internal.distributed._tensor.common_dtensor import \
-    DTensorTestBase
-from torch.testing._internal.distributed._tensor.common_dtensor import \
-    with_comms as base_with_comms
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    DTensorTestBase,
+    with_comms as base_with_comms,
+)
 
 
 def with_comms(func):

@@ -3,8 +3,9 @@ from typing import Any
 
 import torch
 from torch._decomp.decompositions import native_layer_norm_backward
-from torch.distributed._tensor.op_schema import OpSchema, OutputSharding
-from torch.distributed._tensor.ops.utils import register_prop_rule
+
+# from torch.distributed._tensor.op_schema import OpSchema, OutputSharding
+# from torch.distributed._tensor.ops.utils import register_prop_rule
 from torch.distributed._tensor.placement_types import DTensorSpec
 
 aten = torch.ops.aten  # pyre-ignore
@@ -137,21 +138,21 @@ separator_lib.define("sep_backward(Tensor x) -> Tensor")
 separator_lib.impl("sep_backward", sep_backward, "CompositeExplicitAutograd")
 
 
-def _identity_prop_rule(op_schema: OpSchema) -> OutputSharding:
-    (x,) = op_schema.args_schema
-    assert isinstance(x, DTensorSpec), f"expecting DTensorSpec but got {x}"
+# def _identity_prop_rule(op_schema: OpSchema) -> OutputSharding:
+#     (x,) = op_schema.args_schema
+#     assert isinstance(x, DTensorSpec), f"expecting DTensorSpec but got {x}"
 
-    return OutputSharding(output_spec=DTensorSpec(x.mesh, x.placements))
-
-
-@register_prop_rule(torch.ops.separator.sep.default)
-def _prop_sepm(op_schema: OpSchema) -> OutputSharding:
-    return _identity_prop_rule(op_schema)
+#     return OutputSharding(output_spec=DTensorSpec(x.mesh, x.placements))
 
 
-@register_prop_rule(torch.ops.separator.sep_backward.default)
-def _prop_sepm_backward(op_schema: OpSchema) -> OutputSharding:
-    return _identity_prop_rule(op_schema)
+# @register_prop_rule(torch.ops.separator.sep.default)
+# def _prop_sepm(op_schema: OpSchema) -> OutputSharding:
+#     return _identity_prop_rule(op_schema)
+
+
+# @register_prop_rule(torch.ops.separator.sep_backward.default)
+# def _prop_sepm_backward(op_schema: OpSchema) -> OutputSharding:
+#     return _identity_prop_rule(op_schema)
 
 
 class SEPFunction(torch.autograd.Function):

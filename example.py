@@ -7,11 +7,11 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 import torch.nn as nn
+
+from graph_compiler import compile
 from torch.distributed._functional_collectives import all_reduce
 from torch.fx.experimental.proxy_tensor import make_fx
 from torch.nn.parallel import DistributedDataParallel as DDP
-
-from graph_compiler import compile
 
 
 class DummyModel(nn.Module):

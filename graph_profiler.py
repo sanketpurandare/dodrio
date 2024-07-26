@@ -5,23 +5,29 @@ import os
 import pdb
 from dataclasses import fields
 from statistics import mean
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, cast
+from typing import Any, Callable, cast, Dict, Iterator, List, Optional, Tuple
 
 import dill as pickle
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 from functorch.compile import aot_module, make_boxed_func
+
+from graph_profiler_utils import (
+    BiDict,
+    get_tensor_stats,
+    IntermediateNodeInfo,
+    NodeInfo,
+    ProfileMode,
+    ProfInfo,
+    TensorStatus,
+)
+from graph_utils import OP
 from torch import fx
 from torch.autograd.profiler_util import EventList
 from torch.distributed._spmd.data_parallel import NodeType
 from torch.fx.node import map_arg
-from torch.profiler import ProfilerActivity, profile, record_function, schedule
-
-from graph_profiler_utils import (BiDict, IntermediateNodeInfo, NodeInfo,
-                                  ProfileMode, ProfInfo, TensorStatus,
-                                  get_tensor_stats)
-from graph_utils import OP
+from torch.profiler import profile, ProfilerActivity, record_function, schedule
 
 MEM_LIMIT = 0
 PROF_DIR = "./"

@@ -6,21 +6,22 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
 import torch.distributed as dist
+
 # We need to import _functional_collectives to trigger op registration
 import torch.distributed._functional_collectives
 import torch.nn as nn
 import torch.optim as optim
 import torch.utils._pytree as pytree
+
+from graph_compiler_utils import SPMD_DECOMP_TABLE
+from graph_profiler import GraphProfiler, ProfilerEngine
 from torch import fx
 from torch._subclasses.fake_tensor import FakeTensorMode
 from torch.distributed._functional_collectives import all_reduce
 from torch.fx.experimental.proxy_tensor import make_fx
-from torch.fx.graph import CodeGen, _PyTreeCodeGen, _PyTreeInfo
+from torch.fx.graph import _PyTreeCodeGen, _PyTreeInfo, CodeGen
 from torch.nn.utils import stateless
 from torch.utils.hooks import RemovableHandle
-
-from graph_compiler_utils import SPMD_DECOMP_TABLE
-from graph_profiler import GraphProfiler, ProfilerEngine
 
 
 class _PyTreeCodeGenOutputsOnly(_PyTreeCodeGen):
